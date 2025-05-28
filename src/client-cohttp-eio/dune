@@ -1,0 +1,14 @@
+(library
+ (name opentelemetry_client_cohttp_eio)
+ (public_name opentelemetry-client-cohttp-eio)
+ (synopsis "Opentelemetry collector using cohttp+eio+unix")
+ (libraries
+  opentelemetry
+  eio
+  cohttp
+  cohttp-eio
+  eio_main
+  uri
+  pbrt
+  mtime
+  mtime.clock.os))

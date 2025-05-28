@@ -71,6 +71,22 @@
   (instrumentation tracing opentelemetry datadog lwt)))
 
 (package
+ ; TODO
+ (name opentelemetry-eio)
+ (synopsis "Eio-compatible instrumentation for https://opentelemetry.io")
+ (depends
+  (ocaml
+   (>= "4.08"))
+  (opentelemetry
+   (= :version))
+  (cohttp-eio :with-test)
+  (odoc :with-doc)
+  eio
+  (alcotest :with-test))
+ (tags
+  (instrumentation tracing opentelemetry datadog lwt)))
+
+(package
  (name opentelemetry-client-ocurl)
  (depends
   (ocaml
@@ -101,6 +117,24 @@
   (lwt
    (>= "5.3"))
   (cohttp-lwt
+   (>= "6.0.0"))
+  (alcotest :with-test))
+ (synopsis "Opentelemetry tracing for Cohttp HTTP servers"))
+
+(package
+ ; TODO: Not sure this is needed.
+ (name opentelemetry-cohttp-eio)
+ (depends
+  (ocaml
+   (>= "4.08"))
+  (opentelemetry
+   (= :version))
+  (opentelemetry-eio
+   (= :version))
+  (odoc :with-doc)
+  (lwt
+   (>= "5.3"))
+  (cohttp-lwt
    (and
     (>= "4.0.0")
     (< "6")))
@@ -126,3 +160,21 @@
   cohttp-lwt-unix
   (alcotest :with-test))
  (synopsis "Collector client for opentelemetry, using cohttp + lwt"))
+
+(package
+ ; TODO
+ (name opentelemetry-client-cohttp-eio)
+ (depends
+  (ocaml
+   (>= "4.08"))
+  (mtime
+   (>= "1.4"))
+  ; for spans
+  (opentelemetry
+   (= :version))
+  (odoc :with-doc)
+  (cohttp-eio
+   (>= 6.1.0))
+  eio_main
+  (alcotest :with-test))
+ (synopsis "Collector client for opentelemetry, using cohttp + eio"))
