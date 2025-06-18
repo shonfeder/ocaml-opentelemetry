@@ -441,14 +441,13 @@ let mk_emitter ~stop ~(config : Config.t) () : (module EMITTER) =
   end in
   (module M)
 
-module Backend
-    (Arg : sig
-      val stop : bool Atomic.t
+module Backend (Arg : sig
+  val stop : bool Atomic.t
 
-      val config : Config.t
-    end)
-    () : Opentelemetry.Collector.BACKEND = struct
-  include (val mk_emitter ~stop:Arg.stop ~config:Arg.config ())
+  val config : Config.t
+end) : Opentelemetry.Collector.BACKEND = struct
+  module Emitter : EMITTER =
+    (val mk_emitter ~stop:Arg.stop ~config:Arg.config ())
 
   open Opentelemetry.Proto
   open Opentelemetry.Collector
@@ -462,7 +461,7 @@ module Backend
              Format.eprintf "send spans %a@."
                (Format.pp_print_list Trace.pp_resource_spans)
                l);
-          push_trace l;
+          Emitter.push_trace l;
           ret ());
     }
 
@@ -521,7 +520,7 @@ module Backend
                m);
 
           let m = List.rev_append (additional_metrics ()) m in
-          push_metrics m;
+          Emitter.push_metrics m;
           ret ());
     }
 
@@ -535,22 +534,24 @@ module Backend
                (Format.pp_print_list Logs.pp_resource_logs)
                m);
 
-          push_logs m;
+          Emitter.push_logs m;
           ret ());
     }
+
+  let set_on_tick_callbacks = Emitter.set_on_tick_callbacks
+
+  let tick = Emitter.tick
+
+  let cleanup = Emitter.cleanup
 end
 
-let create_backend ?(stop = Atomic.make false) ?(config = Config.make ()) () =
-  let module B =
-    Backend
-      (struct
-        let stop = stop
+let create_backend ?(stop = Atomic.make false) ?(config = Config.make ()) () :
+    (module Collector.BACKEND) =
+  (module Backend (struct
+    let stop = stop
 
-        let config = config
-      end)
-      ()
-  in
-  (module B : OT.Collector.BACKEND)
+    let config = config
+  end))
 
 let setup_ ?stop ?config () : unit =
   let backend = create_backend ?stop ?config () in

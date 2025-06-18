@@ -344,94 +344,103 @@ end = struct
     on_done ()
 end
 
+module Backend (Arg : sig
+  val stop : bool Atomic.t
+
+  val config : Config.t
+end) : Opentelemetry.Collector.BACKEND = struct
+  open Opentelemetry.Proto
+  open Opentelemetry.Collector
+
+  let backend = Backend_impl.create ~stop:Arg.stop ~config:Arg.config ()
+
+  let send_trace : Trace.resource_spans list sender =
+    {
+      send =
+        (fun l ~ret ->
+          Backend_impl.send_event backend (Event.E_trace l);
+          ret ());
+    }
+
+  let last_sent_metrics = Atomic.make (Mtime_clock.now ())
+
+  (* send metrics from time to time *)
+  let timeout_sent_metrics = Mtime.Span.(5 * s)
+
+  let signal_emit_gc_metrics () =
+    if Arg.config.common.debug then
+      Printf.eprintf "opentelemetry: emit GC metrics requested\n%!";
+    Atomic.set needs_gc_metrics true
+
+  let additional_metrics () : Metrics.resource_metrics list =
+    (* add exporter metrics to the lot? *)
+    let last_emit = Atomic.get last_sent_metrics in
+    let now = Mtime_clock.now () in
+    let add_own_metrics =
+      let elapsed = Mtime.span last_emit now in
+      Mtime.Span.compare elapsed timeout_sent_metrics > 0
+    in
+
+    (* there is a possible race condition here, as several threads might update
+         metrics at the same time. But that's harmless. *)
+    if add_own_metrics then (
+      Atomic.set last_sent_metrics now;
+      let open OT.Metrics in
+      let now_unix = OT.Timestamp_ns.now_unix_ns () in
+      [
+        make_resource_metrics
+          [
+            sum ~name:"otel.export.dropped" ~is_monotonic:true
+              [
+                int ~start_time_unix_nano:now_unix ~now:now_unix
+                  (Atomic.get n_dropped);
+              ];
+            sum ~name:"otel.export.errors" ~is_monotonic:true
+              [
+                int ~start_time_unix_nano:now_unix ~now:now_unix
+                  (Atomic.get n_errors);
+              ];
+          ];
+      ]
+    ) else
+      []
+
+  let send_metrics : Metrics.resource_metrics list sender =
+    {
+      send =
+        (fun m ~ret ->
+          let m = List.rev_append (additional_metrics ()) m in
+          Backend_impl.send_event backend (Event.E_metric m);
+          ret ());
+    }
+
+  let send_logs : Logs.resource_logs list sender =
+    {
+      send =
+        (fun m ~ret ->
+          Backend_impl.send_event backend (Event.E_logs m);
+          ret ());
+    }
+
+  let on_tick_cbs_ = Atomic.make (AList.make ())
+
+  let set_on_tick_callbacks = Atomic.set on_tick_cbs_
+
+  let tick () =
+    sample_gc_metrics_if_needed ();
+    Backend_impl.send_event backend Event.E_tick;
+    List.iter (fun f -> f ()) (AList.get @@ Atomic.get on_tick_cbs_)
+
+  let cleanup ~on_done () = Backend_impl.shutdown backend ~on_done
+end
+
 let create_backend ?(stop = Atomic.make false)
     ?(config : Config.t = Config.make ()) () : (module Collector.BACKEND) =
-  let module M = struct
-    open Opentelemetry.Proto
-    open Opentelemetry.Collector
+  (module Backend (struct
+    let stop = stop
 
-    let backend = Backend_impl.create ~stop ~config ()
-
-    let send_trace : Trace.resource_spans list sender =
-      {
-        send =
-          (fun l ~ret ->
-            Backend_impl.send_event backend (Event.E_trace l);
-            ret ());
-      }
-
-    let last_sent_metrics = Atomic.make (Mtime_clock.now ())
-
-    (* send metrics from time to time *)
-    let timeout_sent_metrics = Mtime.Span.(5 * s)
-
-    let signal_emit_gc_metrics () =
-      if config.common.debug then
-        Printf.eprintf "opentelemetry: emit GC metrics requested\n%!";
-      Atomic.set needs_gc_metrics true
-
-    let additional_metrics () : Metrics.resource_metrics list =
-      (* add exporter metrics to the lot? *)
-      let last_emit = Atomic.get last_sent_metrics in
-      let now = Mtime_clock.now () in
-      let add_own_metrics =
-        let elapsed = Mtime.span last_emit now in
-        Mtime.Span.compare elapsed timeout_sent_metrics > 0
-      in
-
-      (* there is a possible race condition here, as several threads might update
-         metrics at the same time. But that's harmless. *)
-      if add_own_metrics then (
-        Atomic.set last_sent_metrics now;
-        let open OT.Metrics in
-        let now_unix = OT.Timestamp_ns.now_unix_ns () in
-        [
-          make_resource_metrics
-            [
-              sum ~name:"otel.export.dropped" ~is_monotonic:true
-                [
-                  int ~start_time_unix_nano:now_unix ~now:now_unix
-                    (Atomic.get n_dropped);
-                ];
-              sum ~name:"otel.export.errors" ~is_monotonic:true
-                [
-                  int ~start_time_unix_nano:now_unix ~now:now_unix
-                    (Atomic.get n_errors);
-                ];
-            ];
-        ]
-      ) else
-        []
-
-    let send_metrics : Metrics.resource_metrics list sender =
-      {
-        send =
-          (fun m ~ret ->
-            let m = List.rev_append (additional_metrics ()) m in
-            Backend_impl.send_event backend (Event.E_metric m);
-            ret ());
-      }
-
-    let send_logs : Logs.resource_logs list sender =
-      {
-        send =
-          (fun m ~ret ->
-            Backend_impl.send_event backend (Event.E_logs m);
-            ret ());
-      }
-
-    let on_tick_cbs_ = Atomic.make (AList.make ())
-
-    let set_on_tick_callbacks = Atomic.set on_tick_cbs_
-
-    let tick () =
-      sample_gc_metrics_if_needed ();
-      Backend_impl.send_event backend Event.E_tick;
-      List.iter (fun f -> f ()) (AList.get @@ Atomic.get on_tick_cbs_)
-
-    let cleanup ~on_done () = Backend_impl.shutdown backend ~on_done
-  end in
-  (module M)
+    let config = config
+  end))
 
 (** thread that calls [tick()] regularly, to help enforce timeouts *)
 let setup_ticker_thread ~stop ~sleep_ms (module B : Collector.BACKEND) () =
