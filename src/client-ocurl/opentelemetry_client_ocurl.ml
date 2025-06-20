@@ -7,45 +7,13 @@ module OT = Opentelemetry
 module Config = Config
 module Self_trace = Opentelemetry_client.Self_trace
 module Signal = Opentelemetry_client.Signal
+module State = Opentelemetry_client.State.Make ()
 open Opentelemetry
 include Common_
 
 let get_headers = Config.Env.get_headers
 
 let set_headers = Config.Env.set_headers
-
-let needs_gc_metrics = Atomic.make false
-
-let last_gc_metrics = Atomic.make (Mtime_clock.now ())
-
-let timeout_gc_metrics = Mtime.Span.(20 * s)
-
-(** side channel for GC, appended to metrics batch data *)
-let gc_metrics = AList.make ()
-
-(** capture current GC metrics if {!needs_gc_metrics} is true or it has been a
-    long time since the last GC metrics collection, and push them into
-    {!gc_metrics} for later collection *)
-let sample_gc_metrics_if_needed () =
-  let now = Mtime_clock.now () in
-  let alarm = Atomic.exchange needs_gc_metrics false in
-  let timeout () =
-    let elapsed = Mtime.span now (Atomic.get last_gc_metrics) in
-    Mtime.Span.compare elapsed timeout_gc_metrics > 0
-  in
-  if alarm || timeout () then (
-    Atomic.set last_gc_metrics now;
-    let l =
-      OT.Metrics.make_resource_metrics
-        ~attrs:(Opentelemetry.GC_metrics.get_runtime_attributes ())
-      @@ Opentelemetry.GC_metrics.get_metrics ()
-    in
-    AList.add gc_metrics l
-  )
-
-let n_errors = Atomic.make 0
-
-let n_dropped = Atomic.make 0
 
 (** Something sent to the collector *)
 module Event = struct
@@ -153,7 +121,7 @@ end = struct
       if Config.Env.get_debug () then
         Printf.eprintf "opentelemetry: got response code=%d\n%!" code
     | Ok { code; body; headers = _; info = _ } ->
-      Atomic.incr n_errors;
+      State.incr_errors ();
       Self_trace.add_event _sc
       @@ Opentelemetry.Event.make "error" ~attrs:[ "code", `Int code ];
 
@@ -176,7 +144,7 @@ end = struct
       Atomic.set stop true
     | Error (code, msg) ->
       (* TODO: log error _via_ otel? *)
-      Atomic.incr n_errors;
+      State.incr_errors ();
 
       Printf.eprintf
         "opentelemetry: export failed:\n  %s\n  curl code: %s\n  url: %s\n%!"
@@ -248,7 +216,9 @@ end = struct
     in
 
     let send_metrics () =
-      let metrics = AList.pop_all gc_metrics :: Batch.pop_all batches.metrics in
+      let metrics =
+        State.drain_gc_metrics () :: Batch.pop_all batches.metrics
+      in
       B_queue.push self.send_q (To_send.Send_metric metrics)
     in
 
@@ -285,7 +255,7 @@ end = struct
         Queue.clear local_q;
 
         if !must_flush_all then (
-          if Batch.len batches.metrics > 0 || not (AList.is_empty gc_metrics)
+          if Batch.len batches.metrics > 0 || not (State.gc_metrics_empty ())
           then
             send_metrics ();
           if Batch.len batches.logs > 0 then send_logs ();
@@ -294,7 +264,7 @@ end = struct
           let now = Mtime_clock.now () in
           if
             should_send_batch_ ~config ~now batches.metrics
-              ~side:(AList.get gc_metrics)
+              ~side:(State.get_gc_metrics ())
           then
             send_metrics ();
 
@@ -362,54 +332,16 @@ end) : Opentelemetry.Collector.BACKEND = struct
           ret ());
     }
 
-  let last_sent_metrics = Atomic.make (Mtime_clock.now ())
-
-  (* send metrics from time to time *)
-  let timeout_sent_metrics = Mtime.Span.(5 * s)
-
   let signal_emit_gc_metrics () =
     if Arg.config.common.debug then
       Printf.eprintf "opentelemetry: emit GC metrics requested\n%!";
-    Atomic.set needs_gc_metrics true
-
-  let additional_metrics () : Metrics.resource_metrics list =
-    (* add exporter metrics to the lot? *)
-    let last_emit = Atomic.get last_sent_metrics in
-    let now = Mtime_clock.now () in
-    let add_own_metrics =
-      let elapsed = Mtime.span last_emit now in
-      Mtime.Span.compare elapsed timeout_sent_metrics > 0
-    in
-
-    (* there is a possible race condition here, as several threads might update
-         metrics at the same time. But that's harmless. *)
-    if add_own_metrics then (
-      Atomic.set last_sent_metrics now;
-      let open OT.Metrics in
-      let now_unix = OT.Timestamp_ns.now_unix_ns () in
-      [
-        make_resource_metrics
-          [
-            sum ~name:"otel.export.dropped" ~is_monotonic:true
-              [
-                int ~start_time_unix_nano:now_unix ~now:now_unix
-                  (Atomic.get n_dropped);
-              ];
-            sum ~name:"otel.export.errors" ~is_monotonic:true
-              [
-                int ~start_time_unix_nano:now_unix ~now:now_unix
-                  (Atomic.get n_errors);
-              ];
-          ];
-      ]
-    ) else
-      []
+    State.set_needs_gc_metrics true
 
   let send_metrics : Metrics.resource_metrics list sender =
     {
       send =
         (fun m ~ret ->
-          let m = List.rev_append (additional_metrics ()) m in
+          let m = List.rev_append (State.additional_metrics ()) m in
           Backend_impl.send_event backend (Event.E_metric m);
           ret ());
     }
@@ -427,7 +359,7 @@ end) : Opentelemetry.Collector.BACKEND = struct
   let set_on_tick_callbacks = Atomic.set on_tick_cbs_
 
   let tick () =
-    sample_gc_metrics_if_needed ();
+    State.sample_gc_metrics_if_needed ();
     Backend_impl.send_event backend Event.E_tick;
     List.iter (fun f -> f ()) (AList.get @@ Atomic.get on_tick_cbs_)
 
