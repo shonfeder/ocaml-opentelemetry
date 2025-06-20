@@ -446,11 +446,11 @@ module Backend (Arg : sig
 
   val config : Config.t
 end) : Opentelemetry.Collector.BACKEND = struct
-  module Emitter : EMITTER =
-    (val mk_emitter ~stop:Arg.stop ~config:Arg.config ())
-
   open Opentelemetry.Proto
   open Opentelemetry.Collector
+
+  module Emitter : EMITTER =
+    (val mk_emitter ~stop:Arg.stop ~config:Arg.config ())
 
   let send_trace : Trace.resource_spans list sender =
     {
