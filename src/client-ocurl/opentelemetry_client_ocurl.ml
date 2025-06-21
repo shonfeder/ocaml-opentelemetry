@@ -221,6 +221,7 @@ end) : Signal.EMITTER = struct
 
     let send_metrics () =
       let metrics =
+        (* TODO: Move this drain into the batching logic! *)
         State.drain_gc_metrics () :: Batch.pop_all batches.metrics
       in
       B_queue.push self.send_q (To_send.Send_metric metrics)
@@ -258,6 +259,7 @@ end) : Signal.EMITTER = struct
         Queue.iter process_ev local_q;
         Queue.clear local_q;
 
+        (* TODO: Move all this into batcher *)
         if !must_flush_all then (
           if Batch.len batches.metrics > 0 || not (State.gc_metrics_empty ())
           then
@@ -302,19 +304,18 @@ end) : Signal.EMITTER = struct
   let[@inline] send_event ev : unit = B_queue.push backend.q ev
 
   let cleanup ~on_done () : unit =
-    let self = backend in
     Atomic.set Arg.stop true;
-    if not (Atomic.exchange self.cleaned true) then (
+    if not (Atomic.exchange backend.cleaned true) then (
       (* empty batches *)
       send_event Event.E_flush_all;
       (* close the incoming queue, wait for the thread to finish
          before we start cutting off the background threads, so that they
          have time to receive the final batches *)
-      B_queue.close self.q;
-      Option.iter Thread.join self.main_th;
+      B_queue.close backend.q;
+      Option.iter Thread.join backend.main_th;
       (* close send queues, then wait for all threads *)
-      B_queue.close self.send_q;
-      Array.iter Thread.join self.send_threads
+      B_queue.close backend.send_q;
+      Array.iter Thread.join backend.send_threads
     );
     on_done ()
 

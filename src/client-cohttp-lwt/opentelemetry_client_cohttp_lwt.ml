@@ -186,6 +186,7 @@ end) : Signal.EMITTER = struct
       match maybe_pop ?force ~now batch_metrics with
       | None -> Lwt.return false
       | Some l ->
+        (* TODO: Move this drain into the batch popping logic! *)
         let batch = State.drain_gc_metrics () @ l in
         let+ () = send_metrics_http batch in
         true
