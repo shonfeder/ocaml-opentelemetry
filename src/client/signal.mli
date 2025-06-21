@@ -47,7 +47,7 @@ module type EMITTER = sig
   val lock : ((unit -> unit) -> unit) option
 end
 
-module Sender : functor (_ : Config.ENV) (_ : State.STATE) -> sig
+module type SENDER = sig
   val send_trace :
     ?lock:((unit -> unit) -> unit) ->
     (Opentelemetry_proto.Trace.resource_spans list -> unit) ->
@@ -66,3 +66,5 @@ module Sender : functor (_ : Config.ENV) (_ : State.STATE) -> sig
 
   val signal_emit_gc_metrics : unit -> unit
 end
+
+module Sender : functor (_ : Config.ENV) (_ : State.STATE) -> SENDER

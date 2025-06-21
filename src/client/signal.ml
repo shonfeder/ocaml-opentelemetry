@@ -60,6 +60,26 @@ module type EMITTER = sig
   val lock : ((unit -> unit) -> unit) option
 end
 
+module type SENDER = sig
+  val send_trace :
+    ?lock:((unit -> unit) -> unit) ->
+    (Opentelemetry_proto.Trace.resource_spans list -> unit) ->
+    Opentelemetry_proto.Trace.resource_spans list Opentelemetry.Collector.sender
+
+  val send_metrics :
+    ?lock:((unit -> unit) -> unit) ->
+    (Opentelemetry_proto.Metrics.resource_metrics list -> unit) ->
+    Opentelemetry_proto.Metrics.resource_metrics list
+    Opentelemetry.Collector.sender
+
+  val send_logs :
+    ?lock:((unit -> unit) -> unit) ->
+    (Opentelemetry_proto.Logs.resource_logs list -> unit) ->
+    Opentelemetry_proto.Logs.resource_logs list Opentelemetry.Collector.sender
+
+  val signal_emit_gc_metrics : unit -> unit
+end
+
 module Sender (Env : Config.ENV) (State : State.STATE) = struct
   module OT = Opentelemetry
 
