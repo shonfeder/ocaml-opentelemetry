@@ -45,31 +45,18 @@ let report_err_ = function
       pp_details details
 
 module Httpc : sig
-  type t
-
-  val create : unit -> t
-
   val send :
-    t ->
     url:string ->
     decode:[ `Dec of Pbrt.Decoder.t -> 'a | `Ret of 'a ] ->
     string ->
     ('a, error) result Lwt.t
-
-  val cleanup : t -> unit
 end = struct
   open Opentelemetry.Proto
   open Lwt.Syntax
   module Httpc = Cohttp_lwt_unix.Client
 
-  type t = unit
-
-  let create () : t = ()
-
-  let cleanup _self = ()
-
   (* send the content to the remote endpoint/path *)
-  let send (_self : t) ~url ~decode (bod : string) : ('a, error) result Lwt.t =
+  let send ~url ~decode (bod : string) : ('a, error) result Lwt.t =
     let uri = Uri.of_string url in
 
     let open Cohttp in
@@ -151,8 +138,6 @@ end) : Signal.EMITTER = struct
 
   (* local helpers *)
   open struct
-    let httpc = Httpc.create ()
-
     let timeout =
       if Arg.config.batch_timeout_ms > 0 then
         Some Mtime.Span.(Arg.config.batch_timeout_ms * ms)
@@ -169,7 +154,7 @@ end) : Signal.EMITTER = struct
       Batch.make ?batch:Arg.config.batch_logs ?timeout ()
 
     let send_http_ ~url data : unit Lwt.t =
-      let* r = Httpc.send httpc ~url ~decode:(`Ret ()) data in
+      let* r = Httpc.send ~url ~decode:(`Ret ()) data in
       match r with
       | Ok () -> Lwt.return ()
       | Error `Sysbreak ->
@@ -300,7 +285,6 @@ end) : Signal.EMITTER = struct
     if Config.Env.get_debug () then Printf.eprintf "opentelemetry: exiting…\n%!";
     Lwt.async (fun () ->
         let* () = emit_all_force () in
-        Httpc.cleanup httpc;
         on_done ();
         Lwt.return ())
 end
