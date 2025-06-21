@@ -234,6 +234,8 @@ end) : Signal.EMITTER = struct
 
   (* local helpers *)
   open struct
+    let httpc = Httpc.create ()
+
     let timeout =
       if Arg.config.batch_timeout_ms > 0 then
         Some Mtime.Span.(Arg.config.batch_timeout_ms * ms)
@@ -249,7 +251,7 @@ end) : Signal.EMITTER = struct
     let batch_logs : Logs.resource_logs list Batch.t =
       Batch.make ?batch:Arg.config.batch_logs ?timeout ()
 
-    let send_http_ (httpc : Httpc.t) ~url data : unit Lwt.t =
+    let send_http_ ~url data : unit Lwt.t =
       let* r = Httpc.send httpc ~url ~decode:(`Ret ()) data in
       match r with
       | Ok () -> Lwt.return ()
@@ -264,40 +266,40 @@ end) : Signal.EMITTER = struct
         (* avoid crazy error loop *)
         Lwt_unix.sleep 3.
 
-    let send_metrics_http client (l : Metrics.resource_metrics list) =
-      Conv.metrics l |> send_http_ client ~url:Arg.config.url_metrics
+    let send_metrics_http (l : Metrics.resource_metrics list) =
+      Conv.metrics l |> send_http_ ~url:Arg.config.url_metrics
 
-    let send_traces_http client (l : Trace.resource_spans list) =
-      Conv.traces l |> send_http_ client ~url:Arg.config.url_traces
+    let send_traces_http (l : Trace.resource_spans list) =
+      Conv.traces l |> send_http_ ~url:Arg.config.url_traces
 
-    let send_logs_http client (l : Logs.resource_logs list) =
-      Conv.logs l |> send_http_ client ~url:Arg.config.url_logs
+    let send_logs_http (l : Logs.resource_logs list) =
+      Conv.logs l |> send_http_ ~url:Arg.config.url_logs
 
     let maybe_pop ?force ~now batch =
       Batch.pop_if_ready ?force ~now batch
       |> Option.map (List.fold_left (fun acc l -> List.rev_append l acc) [])
 
     (* emit metrics, if the batch is full or timeout lapsed *)
-    let emit_metrics_maybe ~now ?force httpc : bool Lwt.t =
+    let emit_metrics_maybe ?force now : bool Lwt.t =
       match maybe_pop ?force ~now batch_metrics with
       | None -> Lwt.return false
       | Some l ->
         let batch = State.drain_gc_metrics () @ l in
-        let+ () = send_metrics_http httpc batch in
+        let+ () = send_metrics_http batch in
         true
 
-    let emit_traces_maybe ~now ?force httpc : bool Lwt.t =
+    let emit_traces_maybe ?force now : bool Lwt.t =
       match maybe_pop ?force ~now batch_traces with
       | None -> Lwt.return false
       | Some l ->
-        let+ () = send_traces_http httpc l in
+        let+ () = send_traces_http l in
         true
 
-    let emit_logs_maybe ~now ?force httpc : bool Lwt.t =
+    let emit_logs_maybe ?force now : bool Lwt.t =
       match maybe_pop ?force ~now batch_logs with
       | None -> Lwt.return false
       | Some l ->
-        let+ () = send_logs_http httpc l in
+        let+ () = send_logs_http l in
         true
 
     let[@inline] guard_exn_ where f =
@@ -308,11 +310,11 @@ end) : Signal.EMITTER = struct
           "opentelemetry-curl: uncaught exception in %s: %s\n%s\n%!" where
           (Printexc.to_string e) bt
 
-    let emit_all_force (httpc : Httpc.t) : unit Lwt.t =
+    let emit_all_force () : unit Lwt.t =
       let now = Mtime_clock.now () in
-      let+ (_ : bool) = emit_traces_maybe ~now ~force:true httpc
-      and+ (_ : bool) = emit_logs_maybe ~now ~force:true httpc
-      and+ (_ : bool) = emit_metrics_maybe ~now ~force:true httpc in
+      let+ (_ : bool) = emit_traces_maybe ~force:true now
+      and+ (_ : bool) = emit_logs_maybe ~force:true now
+      and+ (_ : bool) = emit_metrics_maybe ~force:true now in
       ()
 
     (* thread that calls [tick()] regularly, to help enforce timeouts *)
@@ -329,8 +331,6 @@ end) : Signal.EMITTER = struct
       Lwt.async tick_thread
   end
 
-  let httpc = Httpc.create ()
-
   (* we make sure that this is thread-safe, even though we don't have a
        background thread. There can still be a ticker thread, and there
        can also be several user threads that produce spans and call
@@ -341,7 +341,7 @@ end) : Signal.EMITTER = struct
     Batch.push' batch_traces e;
     let now = Mtime_clock.now () in
     Lwt.async (fun () ->
-        let+ (_ : bool) = emit_traces_maybe ~now httpc in
+        let+ (_ : bool) = emit_traces_maybe now in
         ())
 
   let push_metrics e =
@@ -350,7 +350,7 @@ end) : Signal.EMITTER = struct
     Batch.push' batch_metrics e;
     let now = Mtime_clock.now () in
     Lwt.async (fun () ->
-        let+ (_ : bool) = emit_metrics_maybe ~now httpc in
+        let+ (_ : bool) = emit_metrics_maybe now in
         ())
 
   let push_logs e =
@@ -358,16 +358,16 @@ end) : Signal.EMITTER = struct
     Batch.push' batch_logs e;
     let now = Mtime_clock.now () in
     Lwt.async (fun () ->
-        let+ (_ : bool) = emit_logs_maybe ~now httpc in
+        let+ (_ : bool) = emit_logs_maybe now in
         ())
 
   let tick_ =
     (* TODO: Can we get tick on the outside? *)
     State.Tick.tick @@ fun () ->
     let now = Mtime_clock.now () in
-    let+ (_ : bool) = emit_traces_maybe ~now httpc
-    and+ (_ : bool) = emit_logs_maybe ~now httpc
-    and+ (_ : bool) = emit_metrics_maybe ~now httpc in
+    let+ (_ : bool) = emit_traces_maybe now
+    and+ (_ : bool) = emit_logs_maybe now
+    and+ (_ : bool) = emit_metrics_maybe now in
     ()
 
   let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
@@ -380,7 +380,7 @@ end) : Signal.EMITTER = struct
   let cleanup ~on_done () =
     if Config.Env.get_debug () then Printf.eprintf "opentelemetry: exiting…\n%!";
     Lwt.async (fun () ->
-        let* () = emit_all_force httpc in
+        let* () = emit_all_force () in
         Httpc.cleanup httpc;
         on_done ();
         Lwt.return ())
