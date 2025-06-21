@@ -1,7 +1,9 @@
 module OT = Opentelemetry
 module AList = OT.AList
 
-module Make () : sig
+module type STATE = sig
+  val tid : unit -> int
+
   val incr_dropped : unit -> unit
 
   val incr_errors : unit -> unit
@@ -17,8 +19,18 @@ module Make () : sig
   val gc_metrics_empty : unit -> bool
 
   val get_gc_metrics : unit -> OT.Proto.Metrics.resource_metrics list
-end = struct
+
+  module Tick : sig
+    val set_on_tick_callbacks : (unit -> unit) AList.t -> unit
+
+    val tick : (unit -> 'a) -> unit -> 'a
+  end
+end
+
+module Make (Env : Config.ENV) : STATE = struct
   open Opentelemetry.Proto
+
+  let tid () = Thread.id @@ Thread.self ()
 
   let needs_gc_metrics = Atomic.make false
 
@@ -107,4 +119,22 @@ end = struct
   let get_gc_metrics () = AList.get gc_metrics
 
   let gc_metrics_empty () = AList.is_empty gc_metrics
+
+  module Tick = struct
+    let on_tick_cbs_ = Atomic.make (AList.make ())
+
+    let set_on_tick_callbacks = Atomic.set on_tick_cbs_
+
+    let tick f () =
+      if Env.get_debug () then Printf.eprintf "tick (from %d)\n%!" (tid ());
+      sample_gc_metrics_if_needed ();
+      List.iter
+        (fun f ->
+          try f ()
+          with e ->
+            Printf.eprintf "on tick callback raised: %s\n"
+              (Printexc.to_string e))
+        (AList.get @@ Atomic.get on_tick_cbs_);
+      f ()
+  end
 end

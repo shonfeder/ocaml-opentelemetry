@@ -339,14 +339,10 @@ end) : Opentelemetry.Collector.BACKEND = struct
   let send_logs : Logs.resource_logs list sender =
     Sender.send_logs (fun m -> Backend_impl.send_event backend (Event.E_logs m))
 
-  let on_tick_cbs_ = Atomic.make (AList.make ())
+  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
 
-  let set_on_tick_callbacks = Atomic.set on_tick_cbs_
-
-  let tick () =
-    State.sample_gc_metrics_if_needed ();
-    Backend_impl.send_event backend Event.E_tick;
-    List.iter (fun f -> f ()) (AList.get @@ Atomic.get on_tick_cbs_)
+  let tick =
+    State.Tick.tick @@ fun () -> Backend_impl.send_event backend Event.E_tick
 
   let cleanup ~on_done () = Backend_impl.shutdown backend ~on_done
 end

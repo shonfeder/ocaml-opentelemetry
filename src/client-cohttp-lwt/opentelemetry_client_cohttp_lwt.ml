@@ -377,18 +377,8 @@ let mk_emitter ~stop ~(config : Config.t) () : (module EMITTER) =
 
     let set_on_tick_callbacks = set_on_tick_callbacks
 
-    let tick_ () =
-      if Config.Env.get_debug () then
-        Printf.eprintf "tick (from %d)\n%!" (State.tid ());
-      State.sample_gc_metrics_if_needed ();
-      List.iter
-        (fun f ->
-          try f ()
-          with e ->
-            Printf.eprintf "on tick callback raised: %s\n"
-              (Printexc.to_string e))
-        (AList.get @@ Atomic.get on_tick_cbs_);
-      (* TODO: *)
+    let tick_ =
+      State.Tick.tick @@ fun () ->
       let now = Mtime_clock.now () in
       let+ (_ : bool) = emit_traces_maybe ~now httpc
       and+ (_ : bool) = emit_logs_maybe ~now httpc
