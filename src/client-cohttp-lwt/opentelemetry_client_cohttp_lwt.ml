@@ -216,29 +216,11 @@ end = struct
   let push' self x = ignore (push self x : bool)
 end
 
-(** An emitter. This is used by {!Backend} below to forward traces/metrics/…
-    from the program to whatever collector client we have. *)
-module type EMITTER = sig
-  open Opentelemetry.Proto
-
-  val push_trace : Trace.resource_spans list -> unit
-
-  val push_metrics : Metrics.resource_metrics list -> unit
-
-  val push_logs : Logs.resource_logs list -> unit
-
-  val set_on_tick_callbacks : (unit -> unit) AList.t -> unit
-
-  val tick : unit -> unit
-
-  val cleanup : on_done:(unit -> unit) -> unit -> unit
-end
-
 (* make an emitter.
 
    exceptions inside should be caught, see
    https://opentelemetry.io/docs/reference/specification/error-handling/ *)
-let mk_emitter ~stop ~(config : Config.t) () : (module EMITTER) =
+let mk_emitter ~stop ~(config : Config.t) () : (module Signal.EMITTER) =
   let open Proto in
   let open Lwt.Syntax in
   let module Conv = Signal.Converter in
@@ -258,10 +240,6 @@ let mk_emitter ~stop ~(config : Config.t) () : (module EMITTER) =
 
     let batch_logs : Logs.resource_logs list Batch.t =
       Batch.make ?batch:config.batch_logs ?timeout ()
-
-    let on_tick_cbs_ = Atomic.make (AList.make ())
-
-    let set_on_tick_callbacks = Atomic.set on_tick_cbs_
 
     let send_http_ (httpc : Httpc.t) ~url data : unit Lwt.t =
       let* r = Httpc.send httpc ~url ~decode:(`Ret ()) data in
@@ -375,9 +353,8 @@ let mk_emitter ~stop ~(config : Config.t) () : (module EMITTER) =
           let+ (_ : bool) = emit_logs_maybe ~now httpc in
           ())
 
-    let set_on_tick_callbacks = set_on_tick_callbacks
-
     let tick_ =
+      (* TODO: Can we get tick on the outside? *)
       State.Tick.tick @@ fun () ->
       let now = Mtime_clock.now () in
       let+ (_ : bool) = emit_traces_maybe ~now httpc
@@ -409,7 +386,7 @@ end) : Opentelemetry.Collector.BACKEND = struct
   open Opentelemetry.Proto
   open Opentelemetry.Collector
 
-  module Emitter : EMITTER =
+  module Emitter : Signal.EMITTER =
     (val mk_emitter ~stop:Arg.stop ~config:Arg.config ())
 
   let send_trace : Trace.resource_spans list sender =
@@ -423,7 +400,7 @@ end) : Opentelemetry.Collector.BACKEND = struct
   let send_logs : Logs.resource_logs list sender =
     Sender.send_logs ~lock:Lock.with_lock Emitter.push_logs
 
-  let set_on_tick_callbacks = Emitter.set_on_tick_callbacks
+  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
 
   let tick = Emitter.tick
 

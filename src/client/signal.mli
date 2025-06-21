@@ -30,6 +30,21 @@ module Converter : sig
       @param encoder provide an encoder state to reuse *)
 end
 
+(** An emitter. API to send signals to the collector client. *)
+module type EMITTER = sig
+  open Opentelemetry.Proto
+
+  val push_trace : Trace.resource_spans list -> unit
+
+  val push_metrics : Metrics.resource_metrics list -> unit
+
+  val push_logs : Logs.resource_logs list -> unit
+
+  val tick : unit -> unit
+
+  val cleanup : on_done:(unit -> unit) -> unit -> unit
+end
+
 module Sender : functor (_ : Config.ENV) (_ : State.STATE) -> sig
   val send_trace :
     ?lock:((unit -> unit) -> unit) ->

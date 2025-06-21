@@ -43,6 +43,21 @@ module Converter = struct
          ~enc:Trace_service.encode_pb_export_trace_service_request
 end
 
+(** An emitter. API to send signals to the collector client. *)
+module type EMITTER = sig
+  open Opentelemetry.Proto
+
+  val push_trace : Trace.resource_spans list -> unit
+
+  val push_metrics : Metrics.resource_metrics list -> unit
+
+  val push_logs : Logs.resource_logs list -> unit
+
+  val tick : unit -> unit
+
+  val cleanup : on_done:(unit -> unit) -> unit -> unit
+end
+
 module Sender (Env : Config.ENV) (State : State.STATE) = struct
   module OT = Opentelemetry
 
