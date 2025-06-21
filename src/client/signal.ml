@@ -56,6 +56,8 @@ module type EMITTER = sig
   val tick : unit -> unit
 
   val cleanup : on_done:(unit -> unit) -> unit -> unit
+
+  val lock : ((unit -> unit) -> unit) option
 end
 
 module Sender (Env : Config.ENV) (State : State.STATE) = struct

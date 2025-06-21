@@ -5,7 +5,8 @@
 
 module OT = Opentelemetry
 module Config = Config
-module Signal = Opentelemetry_client.Signal
+module Client = Opentelemetry_client
+module Signal = Client.Signal
 open Opentelemetry
 open Common_
 
@@ -229,6 +230,8 @@ end) : Signal.EMITTER = struct
   open Lwt.Syntax
   module Conv = Signal.Converter
 
+  let lock = Some Lock.with_lock
+
   (* local helpers *)
   open struct
     let timeout =
@@ -381,41 +384,14 @@ end) : Signal.EMITTER = struct
         Lwt.return ())
 end
 
-module Backend (Arg : sig
-  val stop : bool Atomic.t
-
-  val config : Config.t
-end) : Opentelemetry.Collector.BACKEND = struct
-  open Opentelemetry.Proto
-  open Opentelemetry.Collector
-
-  module Emitter : Signal.EMITTER = Emitter (Arg)
-
-  let send_trace : Trace.resource_spans list sender =
-    Sender.send_trace ~lock:Lock.with_lock Emitter.push_trace
-
-  let signal_emit_gc_metrics = Sender.signal_emit_gc_metrics
-
-  let send_metrics : Metrics.resource_metrics list sender =
-    Sender.send_metrics ~lock:Lock.with_lock Emitter.push_metrics
-
-  let send_logs : Logs.resource_logs list sender =
-    Sender.send_logs ~lock:Lock.with_lock Emitter.push_logs
-
-  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
-
-  let tick = Emitter.tick
-
-  let cleanup = Emitter.cleanup
-end
-
 let create_backend ?(stop = Atomic.make false) ?(config = Config.make ()) () :
     (module Collector.BACKEND) =
-  (module Backend (struct
-    let stop = stop
+  (module Client.Backend.Make (Config.Env) (State)
+            (Emitter (struct
+              let stop = stop
 
-    let config = config
-  end))
+              let config = config
+            end)))
 
 let setup_ ?stop ?config () : unit =
   let backend = create_backend ?stop ?config () in

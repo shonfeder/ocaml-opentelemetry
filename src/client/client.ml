@@ -7,3 +7,4 @@ module Config = Config
 module Signal = Signal
 module Self_trace = Self_trace
 module State = State
+module Backend = Backend

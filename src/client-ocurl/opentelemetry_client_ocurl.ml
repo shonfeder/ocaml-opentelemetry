@@ -5,8 +5,9 @@
 
 module OT = Opentelemetry
 module Config = Config
-module Self_trace = Opentelemetry_client.Self_trace
-module Signal = Opentelemetry_client.Signal
+module Client = Opentelemetry_client
+module Self_trace = Client.Self_trace
+module Signal = Client.Signal
 open Opentelemetry
 include Common_
 
@@ -86,6 +87,8 @@ module Emitter (Arg : sig
   val config : Config.t
 end) : Signal.EMITTER = struct
   open Opentelemetry.Proto
+
+  let lock = None
 
   type t = {
     stop: bool Atomic.t;
@@ -321,40 +324,14 @@ end) : Signal.EMITTER = struct
   let tick = State.Tick.tick @@ fun () -> send_event Event.E_tick
 end
 
-module Backend (Arg : sig
-  val stop : bool Atomic.t
-
-  val config : Config.t
-end) : Opentelemetry.Collector.BACKEND = struct
-  open Opentelemetry.Proto
-  open Opentelemetry.Collector
-  module Emitter = Emitter (Arg)
-
-  let send_trace : Trace.resource_spans list sender =
-    Sender.send_trace Emitter.push_trace
-
-  let signal_emit_gc_metrics = Sender.signal_emit_gc_metrics
-
-  let send_metrics : Metrics.resource_metrics list sender =
-    Sender.send_metrics Emitter.push_metrics
-
-  let send_logs : Logs.resource_logs list sender =
-    Sender.send_logs Emitter.push_logs
-
-  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
-
-  let tick = Emitter.tick
-
-  let cleanup ~on_done = Emitter.cleanup ~on_done
-end
-
 let create_backend ?(stop = Atomic.make false)
     ?(config : Config.t = Config.make ()) () : (module Collector.BACKEND) =
-  (module Backend (struct
-    let stop = stop
+  (module Client.Backend.Make (Config.Env) (State)
+            (Emitter (struct
+              let stop = stop
 
-    let config = config
-  end))
+              let config = config
+            end)))
 
 (** thread that calls [tick()] regularly, to help enforce timeouts *)
 let setup_ticker_thread ~stop ~sleep_ms (module B : Collector.BACKEND) () =
