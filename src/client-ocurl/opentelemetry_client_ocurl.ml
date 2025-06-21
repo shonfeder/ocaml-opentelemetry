@@ -90,6 +90,12 @@ end) : Signal.EMITTER = struct
 
   let lock = None
 
+  let timeout =
+    if Arg.config.common.batch_timeout_ms > 0 then
+      Some Mtime.Span.(Arg.config.common.batch_timeout_ms * ms)
+    else
+      None
+
   type t = {
     cleaned: bool Atomic.t;  (** True when we cleaned up after closing *)
     q: Event.t B_queue.t;  (** Queue to receive data from the user's code *)
@@ -152,7 +158,8 @@ end) : Signal.EMITTER = struct
       (* avoid crazy error loop *)
       Thread.delay 3.
 
-  (** Thread that, in a loop, reads from [q] to get the next message to send via
+  (*
+* Thread that, in a loop, reads from [q] to get the next message to send via
       http *)
   let bg_thread_loop (self : t) : unit =
     Ezcurl.with_client ?set_opts:None @@ fun client ->
@@ -190,13 +197,16 @@ end) : Signal.EMITTER = struct
 
   let batch_max_size_ = 200
 
-  let should_send_batch_ ?(side = []) ~config ~now (b : _ Batch.t) : bool =
+  let timeout_expired_ ~now batch : bool =
+    match timeout with
+    | Some t ->
+      let elapsed = Mtime.span now (Batch.time_started batch) in
+      Mtime.Span.compare elapsed t >= 0
+    | None -> false
+
+  let should_send_batch_ ?(side = []) ~now (b : _ Batch.t) : bool =
     (Batch.len b > 0 || side != [])
-    && (Batch.len b >= batch_max_size_
-       ||
-       let timeout = Mtime.Span.(config.Config.common.batch_timeout_ms * ms) in
-       let elapsed = Mtime.span now (Batch.time_started b) in
-       Mtime.Span.compare elapsed timeout >= 0)
+    && (Batch.len b >= batch_max_size_ || timeout_expired_ ~now b)
 
   let main_thread_loop (self : t) : unit =
     let local_q = Queue.create () in
@@ -259,13 +269,13 @@ end) : Signal.EMITTER = struct
         ) else (
           let now = Mtime_clock.now () in
           if
-            should_send_batch_ ~config ~now batches.metrics
+            should_send_batch_ ~now batches.metrics
               ~side:(State.get_gc_metrics ())
           then
             send_metrics ();
 
-          if should_send_batch_ ~config ~now batches.traces then send_traces ();
-          if should_send_batch_ ~config ~now batches.logs then send_logs ()
+          if should_send_batch_ ~now batches.traces then send_traces ();
+          if should_send_batch_ ~now batches.logs then send_logs ()
         )
       done
     with B_queue.Closed -> ()
