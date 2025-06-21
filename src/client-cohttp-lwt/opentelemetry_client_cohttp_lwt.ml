@@ -135,88 +135,6 @@ end = struct
       )
 end
 
-(** Batch of resources to be pushed later.
-
-    This type is thread-safe. *)
-module Batch : sig
-  type 'a t
-
-  val push' : 'a t -> 'a -> unit
-
-  val pop_if_ready : ?force:bool -> now:Mtime.t -> 'a t -> 'a list option
-  (** Is the batch ready to be emitted? If batching is disabled, this is true as
-      soon as {!is_empty} is false. If a timeout is provided for this batch,
-      then it will be ready if an element has been in it for at least the
-      timeout.
-      @param now passed to implement timeout *)
-
-  val make : ?batch:int -> ?timeout:Mtime.span -> unit -> 'a t
-  (** Create a new batch *)
-end = struct
-  type 'a t = {
-    mutable size: int;
-    mutable q: 'a list;
-    batch: int option;
-    high_watermark: int;
-    timeout: Mtime.span option;
-    mutable start: Mtime.t;
-  }
-
-  let make ?batch ?timeout () : _ t =
-    Option.iter (fun b -> assert (b > 0)) batch;
-    let high_watermark = Option.fold ~none:100 ~some:(fun x -> x * 10) batch in
-    {
-      size = 0;
-      start = Mtime_clock.now ();
-      q = [];
-      batch;
-      timeout;
-      high_watermark;
-    }
-
-  let timeout_expired_ ~now self : bool =
-    match self.timeout with
-    | Some t ->
-      let elapsed = Mtime.span now self.start in
-      Mtime.Span.compare elapsed t >= 0
-    | None -> false
-
-  let is_full_ self : bool =
-    match self.batch with
-    | None -> self.size > 0
-    | Some b -> self.size >= b
-
-  let pop_if_ready ?(force = false) ~now (self : _ t) : _ list option =
-    if self.size > 0 && (force || is_full_ self || timeout_expired_ ~now self)
-    then (
-      let l = self.q in
-      self.q <- [];
-      self.size <- 0;
-      assert (l <> []);
-      Some l
-    ) else
-      None
-
-  let push (self : _ t) x : bool =
-    if self.size >= self.high_watermark then (
-      (* drop this to prevent queue from growing too fast *)
-      State.incr_dropped ();
-      true
-    ) else (
-      if self.size = 0 && Option.is_some self.timeout then
-        (* current batch starts now *)
-        self.start <- Mtime_clock.now ();
-
-      (* add to queue *)
-      self.size <- 1 + self.size;
-      self.q <- x :: self.q;
-      let ready = is_full_ self in
-      ready
-    )
-
-  let push' self x = ignore (push self x : bool)
-end
-
 (* make an Emitter.
 
    exceptions inside should be caught, see
@@ -336,9 +254,13 @@ end) : Signal.EMITTER = struct
        can also be several user threads that produce spans and call
        the emit functions. *)
 
+  let report_dropped = function
+    | `Dropped -> State.incr_dropped ()
+    | `Ok -> ()
+
   let push_trace e =
     let@ () = guard_exn_ "push trace" in
-    Batch.push' batch_traces e;
+    Batch.push batch_traces e |> report_dropped;
     let now = Mtime_clock.now () in
     Lwt.async (fun () ->
         let+ (_ : bool) = emit_traces_maybe now in
@@ -347,7 +269,7 @@ end) : Signal.EMITTER = struct
   let push_metrics e =
     let@ () = guard_exn_ "push metrics" in
     State.sample_gc_metrics_if_needed ();
-    Batch.push' batch_metrics e;
+    Batch.push batch_metrics e |> report_dropped;
     let now = Mtime_clock.now () in
     Lwt.async (fun () ->
         let+ (_ : bool) = emit_metrics_maybe now in
@@ -355,7 +277,7 @@ end) : Signal.EMITTER = struct
 
   let push_logs e =
     let@ () = guard_exn_ "push logs" in
-    Batch.push' batch_logs e;
+    Batch.push batch_logs e |> report_dropped;
     let now = Mtime_clock.now () in
     Lwt.async (fun () ->
         let+ (_ : bool) = emit_logs_maybe now in
