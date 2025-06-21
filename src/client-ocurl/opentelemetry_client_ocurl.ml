@@ -91,9 +91,7 @@ end) : Signal.EMITTER = struct
   let lock = None
 
   type t = {
-    stop: bool Atomic.t;
     cleaned: bool Atomic.t;  (** True when we cleaned up after closing *)
-    config: Config.t;
     q: Event.t B_queue.t;  (** Queue to receive data from the user's code *)
     mutable main_th: Thread.t option;  (** Thread that listens on [q] *)
     send_q: To_send.t B_queue.t;  (** Queue for the send worker threads *)
@@ -158,8 +156,8 @@ end) : Signal.EMITTER = struct
       http *)
   let bg_thread_loop (self : t) : unit =
     Ezcurl.with_client ?set_opts:None @@ fun client ->
-    let config = self.config in
-    let stop = self.stop in
+    let config = Arg.config in
+    let stop = Arg.stop in
     let send ~name ~url ~conv signals =
       let l = List.fold_left (fun acc l -> List.rev_append l acc) [] signals in
       let@ _sp =
@@ -203,7 +201,7 @@ end) : Signal.EMITTER = struct
 
   let main_thread_loop (self : t) : unit =
     let local_q = Queue.create () in
-    let config = self.config in
+    let config = Arg.config in
 
     (* keep track of batches *)
     let batches =
@@ -231,7 +229,7 @@ end) : Signal.EMITTER = struct
     in
 
     try
-      while not (Atomic.get self.stop) do
+      while not (Atomic.get Arg.stop) do
         (* read multiple events at once *)
         B_queue.pop_all self.q local_q;
 
@@ -277,8 +275,6 @@ end) : Signal.EMITTER = struct
     let n_send_threads = max 2 Arg.config.bg_threads in
     let self =
       {
-        stop = Arg.stop;
-        config = Arg.config;
         q = B_queue.create ();
         send_threads = [||];
         send_q = B_queue.create ();
@@ -300,7 +296,7 @@ end) : Signal.EMITTER = struct
 
   let cleanup ~on_done () : unit =
     let self = backend in
-    Atomic.set self.stop true;
+    Atomic.set Arg.stop true;
     if not (Atomic.exchange self.cleaned true) then (
       (* empty batches *)
       send_event Event.E_flush_all;
@@ -322,11 +318,14 @@ end) : Signal.EMITTER = struct
   let push_logs l = send_event (Event.E_logs l)
 
   let tick = State.Tick.tick @@ fun () -> send_event Event.E_tick
+
+  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
 end
 
 let create_backend ?(stop = Atomic.make false)
     ?(config : Config.t = Config.make ()) () : (module Collector.BACKEND) =
-  (module Client.Backend.Make (Config.Env) (State)
+  (module Client.Backend.Make
+            (Sender)
             (Emitter (struct
               let stop = stop
 

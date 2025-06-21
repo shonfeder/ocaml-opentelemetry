@@ -370,6 +370,8 @@ end) : Signal.EMITTER = struct
     and+ (_ : bool) = emit_metrics_maybe ~now httpc in
     ()
 
+  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
+
   let () = setup_ticker_thread ~tick:tick_ ~finally:ignore ()
 
   (* if called in a blocking context: work in the background *)
@@ -386,7 +388,8 @@ end
 
 let create_backend ?(stop = Atomic.make false) ?(config = Config.make ()) () :
     (module Collector.BACKEND) =
-  (module Client.Backend.Make (Config.Env) (State)
+  (module Client.Backend.Make
+            (Sender)
             (Emitter (struct
               let stop = stop
 
