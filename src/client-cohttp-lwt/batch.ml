@@ -56,6 +56,5 @@ let push (self : _ t) x : [ `Dropped | `Ok ] =
     (* add to queue *)
     self.size <- 1 + self.size;
     self.q <- x :: self.q;
-    let ready = is_full_ self in
     `Ok
   )
