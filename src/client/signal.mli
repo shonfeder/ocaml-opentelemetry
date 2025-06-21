@@ -42,8 +42,6 @@ module type EMITTER = sig
 
   val tick : unit -> unit
 
-  val set_on_tick_callbacks : (unit -> unit) Opentelemetry.AList.t -> unit
-
   val cleanup : on_done:(unit -> unit) -> unit -> unit
 
   val lock : ((unit -> unit) -> unit) option

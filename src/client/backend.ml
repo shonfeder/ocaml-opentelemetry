@@ -60,7 +60,7 @@ module Make
           ret ());
     }
 
-  let set_on_tick_callbacks = Emitter.set_on_tick_callbacks
+  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
 
   let tick = Emitter.tick
 

@@ -325,8 +325,6 @@ end) : Signal.EMITTER = struct
   let push_logs l = send_event (Event.E_logs l)
 
   let tick = State.Tick.tick @@ fun () -> send_event Event.E_tick
-
-  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
 end
 
 let create_backend ?(stop = Atomic.make false)

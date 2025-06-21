@@ -291,8 +291,6 @@ end) : Signal.EMITTER = struct
     and+ (_ : bool) = emit_metrics_maybe now in
     ()
 
-  let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
-
   let () = setup_ticker_thread ~tick:tick_ ~finally:ignore ()
 
   (* if called in a blocking context: work in the background *)
