@@ -80,7 +80,7 @@ let str_to_hex (s : string) : string =
   done;
   Bytes.unsafe_to_string res
 
-module Backend_impl (Arg : sig
+module Emitter (Arg : sig
   val stop : bool Atomic.t
 
   val config : Config.t
@@ -328,7 +328,7 @@ module Backend (Arg : sig
 end) : Opentelemetry.Collector.BACKEND = struct
   open Opentelemetry.Proto
   open Opentelemetry.Collector
-  module Emitter = Backend_impl (Arg)
+  module Emitter = Emitter (Arg)
 
   let send_trace : Trace.resource_spans list sender =
     Sender.send_trace Emitter.push_trace
