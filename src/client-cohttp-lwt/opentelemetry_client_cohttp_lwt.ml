@@ -216,30 +216,35 @@ end = struct
   let push' self x = ignore (push self x : bool)
 end
 
-(* make an emitter.
+(* make an Emitter.
 
    exceptions inside should be caught, see
    https://opentelemetry.io/docs/reference/specification/error-handling/ *)
-let mk_emitter ~stop ~(config : Config.t) () : (module Signal.EMITTER) =
-  let open Proto in
-  let open Lwt.Syntax in
-  let module Conv = Signal.Converter in
+module Emitter (Arg : sig
+  val stop : bool Atomic.t
+
+  val config : Config.t
+end) : Signal.EMITTER = struct
+  open Proto
+  open Lwt.Syntax
+  module Conv = Signal.Converter
+
   (* local helpers *)
-  let open struct
+  open struct
     let timeout =
-      if config.batch_timeout_ms > 0 then
-        Some Mtime.Span.(config.batch_timeout_ms * ms)
+      if Arg.config.batch_timeout_ms > 0 then
+        Some Mtime.Span.(Arg.config.batch_timeout_ms * ms)
       else
         None
 
     let batch_traces : Trace.resource_spans list Batch.t =
-      Batch.make ?batch:config.batch_traces ?timeout ()
+      Batch.make ?batch:Arg.config.batch_traces ?timeout ()
 
     let batch_metrics : Metrics.resource_metrics list Batch.t =
-      Batch.make ?batch:config.batch_metrics ?timeout ()
+      Batch.make ?batch:Arg.config.batch_metrics ?timeout ()
 
     let batch_logs : Logs.resource_logs list Batch.t =
-      Batch.make ?batch:config.batch_logs ?timeout ()
+      Batch.make ?batch:Arg.config.batch_logs ?timeout ()
 
     let send_http_ (httpc : Httpc.t) ~url data : unit Lwt.t =
       let* r = Httpc.send httpc ~url ~decode:(`Ret ()) data in
@@ -247,7 +252,7 @@ let mk_emitter ~stop ~(config : Config.t) () : (module Signal.EMITTER) =
       | Ok () -> Lwt.return ()
       | Error `Sysbreak ->
         Printf.eprintf "ctrl-c captured, stopping\n%!";
-        Atomic.set stop true;
+        Atomic.set Arg.stop true;
         Lwt.return ()
       | Error err ->
         (* TODO: log error _via_ otel? *)
@@ -257,13 +262,13 @@ let mk_emitter ~stop ~(config : Config.t) () : (module Signal.EMITTER) =
         Lwt_unix.sleep 3.
 
     let send_metrics_http client (l : Metrics.resource_metrics list) =
-      Conv.metrics l |> send_http_ client ~url:config.url_metrics
+      Conv.metrics l |> send_http_ client ~url:Arg.config.url_metrics
 
     let send_traces_http client (l : Trace.resource_spans list) =
-      Conv.traces l |> send_http_ client ~url:config.url_traces
+      Conv.traces l |> send_http_ client ~url:Arg.config.url_traces
 
     let send_logs_http client (l : Logs.resource_logs list) =
-      Conv.logs l |> send_http_ client ~url:config.url_logs
+      Conv.logs l |> send_http_ client ~url:Arg.config.url_logs
 
     let maybe_pop ?force ~now batch =
       Batch.pop_if_ready ?force ~now batch
@@ -310,7 +315,7 @@ let mk_emitter ~stop ~(config : Config.t) () : (module Signal.EMITTER) =
     (* thread that calls [tick()] regularly, to help enforce timeouts *)
     let setup_ticker_thread ~tick ~finally () =
       let rec tick_thread () =
-        if Atomic.get stop then (
+        if Atomic.get Arg.stop then (
           finally ();
           Lwt.return ()
         ) else
@@ -319,64 +324,62 @@ let mk_emitter ~stop ~(config : Config.t) () : (module Signal.EMITTER) =
           tick_thread ()
       in
       Lwt.async tick_thread
-  end in
-  let httpc = Httpc.create () in
+  end
 
-  let module M = struct
-    (* we make sure that this is thread-safe, even though we don't have a
+  let httpc = Httpc.create ()
+
+  (* we make sure that this is thread-safe, even though we don't have a
        background thread. There can still be a ticker thread, and there
        can also be several user threads that produce spans and call
        the emit functions. *)
 
-    let push_trace e =
-      let@ () = guard_exn_ "push trace" in
-      Batch.push' batch_traces e;
-      let now = Mtime_clock.now () in
-      Lwt.async (fun () ->
-          let+ (_ : bool) = emit_traces_maybe ~now httpc in
-          ())
+  let push_trace e =
+    let@ () = guard_exn_ "push trace" in
+    Batch.push' batch_traces e;
+    let now = Mtime_clock.now () in
+    Lwt.async (fun () ->
+        let+ (_ : bool) = emit_traces_maybe ~now httpc in
+        ())
 
-    let push_metrics e =
-      let@ () = guard_exn_ "push metrics" in
-      State.sample_gc_metrics_if_needed ();
-      Batch.push' batch_metrics e;
-      let now = Mtime_clock.now () in
-      Lwt.async (fun () ->
-          let+ (_ : bool) = emit_metrics_maybe ~now httpc in
-          ())
+  let push_metrics e =
+    let@ () = guard_exn_ "push metrics" in
+    State.sample_gc_metrics_if_needed ();
+    Batch.push' batch_metrics e;
+    let now = Mtime_clock.now () in
+    Lwt.async (fun () ->
+        let+ (_ : bool) = emit_metrics_maybe ~now httpc in
+        ())
 
-    let push_logs e =
-      let@ () = guard_exn_ "push logs" in
-      Batch.push' batch_logs e;
-      let now = Mtime_clock.now () in
-      Lwt.async (fun () ->
-          let+ (_ : bool) = emit_logs_maybe ~now httpc in
-          ())
+  let push_logs e =
+    let@ () = guard_exn_ "push logs" in
+    Batch.push' batch_logs e;
+    let now = Mtime_clock.now () in
+    Lwt.async (fun () ->
+        let+ (_ : bool) = emit_logs_maybe ~now httpc in
+        ())
 
-    let tick_ =
-      (* TODO: Can we get tick on the outside? *)
-      State.Tick.tick @@ fun () ->
-      let now = Mtime_clock.now () in
-      let+ (_ : bool) = emit_traces_maybe ~now httpc
-      and+ (_ : bool) = emit_logs_maybe ~now httpc
-      and+ (_ : bool) = emit_metrics_maybe ~now httpc in
-      ()
+  let tick_ =
+    (* TODO: Can we get tick on the outside? *)
+    State.Tick.tick @@ fun () ->
+    let now = Mtime_clock.now () in
+    let+ (_ : bool) = emit_traces_maybe ~now httpc
+    and+ (_ : bool) = emit_logs_maybe ~now httpc
+    and+ (_ : bool) = emit_metrics_maybe ~now httpc in
+    ()
 
-    let () = setup_ticker_thread ~tick:tick_ ~finally:ignore ()
+  let () = setup_ticker_thread ~tick:tick_ ~finally:ignore ()
 
-    (* if called in a blocking context: work in the background *)
-    let tick () = Lwt.async tick_
+  (* if called in a blocking context: work in the background *)
+  let tick () = Lwt.async tick_
 
-    let cleanup ~on_done () =
-      if Config.Env.get_debug () then
-        Printf.eprintf "opentelemetry: exiting…\n%!";
-      Lwt.async (fun () ->
-          let* () = emit_all_force httpc in
-          Httpc.cleanup httpc;
-          on_done ();
-          Lwt.return ())
-  end in
-  (module M)
+  let cleanup ~on_done () =
+    if Config.Env.get_debug () then Printf.eprintf "opentelemetry: exiting…\n%!";
+    Lwt.async (fun () ->
+        let* () = emit_all_force httpc in
+        Httpc.cleanup httpc;
+        on_done ();
+        Lwt.return ())
+end
 
 module Backend (Arg : sig
   val stop : bool Atomic.t
@@ -386,8 +389,7 @@ end) : Opentelemetry.Collector.BACKEND = struct
   open Opentelemetry.Proto
   open Opentelemetry.Collector
 
-  module Emitter : Signal.EMITTER =
-    (val mk_emitter ~stop:Arg.stop ~config:Arg.config ())
+  module Emitter : Signal.EMITTER = Emitter (Arg)
 
   let send_trace : Trace.resource_spans list sender =
     Sender.send_trace ~lock:Lock.with_lock Emitter.push_trace
