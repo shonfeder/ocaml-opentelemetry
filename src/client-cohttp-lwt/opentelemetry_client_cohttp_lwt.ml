@@ -6,13 +6,15 @@
 module OT = Opentelemetry
 module Config = Config
 module Signal = Opentelemetry_client.Signal
-module State = Opentelemetry_client.State.Make ()
 open Opentelemetry
 open Common_
 
 let set_headers = Config.Env.set_headers
 
 let get_headers = Config.Env.get_headers
+
+module State = Opentelemetry_client.State.Make (Config.Env)
+module Sender = Signal.Sender (Config.Env) (State)
 
 external reraise : exn -> 'a = "%reraise"
 (** This is equivalent to [Lwt.reraise]. We inline it here so we don't force to
@@ -377,7 +379,7 @@ let mk_emitter ~stop ~(config : Config.t) () : (module EMITTER) =
 
     let tick_ () =
       if Config.Env.get_debug () then
-        Printf.eprintf "tick (from %d)\n%!" (tid ());
+        Printf.eprintf "tick (from %d)\n%!" (State.tid ());
       State.sample_gc_metrics_if_needed ();
       List.iter
         (fun f ->
@@ -386,6 +388,7 @@ let mk_emitter ~stop ~(config : Config.t) () : (module EMITTER) =
             Printf.eprintf "on tick callback raised: %s\n"
               (Printexc.to_string e))
         (AList.get @@ Atomic.get on_tick_cbs_);
+      (* TODO: *)
       let now = Mtime_clock.now () in
       let+ (_ : bool) = emit_traces_maybe ~now httpc
       and+ (_ : bool) = emit_logs_maybe ~now httpc
@@ -420,51 +423,15 @@ end) : Opentelemetry.Collector.BACKEND = struct
     (val mk_emitter ~stop:Arg.stop ~config:Arg.config ())
 
   let send_trace : Trace.resource_spans list sender =
-    {
-      send =
-        (fun l ~ret ->
-          (if Config.Env.get_debug () then
-             let@ () = Lock.with_lock in
-             Format.eprintf "send spans %a@."
-               (Format.pp_print_list Trace.pp_resource_spans)
-               l);
-          Emitter.push_trace l;
-          ret ());
-    }
+    Sender.send_trace ~lock:Lock.with_lock Emitter.push_trace
 
-  let signal_emit_gc_metrics () =
-    if Config.Env.get_debug () then
-      Printf.eprintf "opentelemetry: emit GC metrics requested\n%!";
-    State.set_needs_gc_metrics true
+  let signal_emit_gc_metrics = Sender.signal_emit_gc_metrics
 
   let send_metrics : Metrics.resource_metrics list sender =
-    {
-      send =
-        (fun m ~ret ->
-          (if Config.Env.get_debug () then
-             let@ () = Lock.with_lock in
-             Format.eprintf "send metrics %a@."
-               (Format.pp_print_list Metrics.pp_resource_metrics)
-               m);
-
-          let m = List.rev_append (State.additional_metrics ()) m in
-          Emitter.push_metrics m;
-          ret ());
-    }
+    Sender.send_metrics ~lock:Lock.with_lock Emitter.push_metrics
 
   let send_logs : Logs.resource_logs list sender =
-    {
-      send =
-        (fun m ~ret ->
-          (if Config.Env.get_debug () then
-             let@ () = Lock.with_lock in
-             Format.eprintf "send logs %a@."
-               (Format.pp_print_list Logs.pp_resource_logs)
-               m);
-
-          Emitter.push_logs m;
-          ret ());
-    }
+    Sender.send_logs ~lock:Lock.with_lock Emitter.push_logs
 
   let set_on_tick_callbacks = Emitter.set_on_tick_callbacks
 

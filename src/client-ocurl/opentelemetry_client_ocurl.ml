@@ -7,13 +7,15 @@ module OT = Opentelemetry
 module Config = Config
 module Self_trace = Opentelemetry_client.Self_trace
 module Signal = Opentelemetry_client.Signal
-module State = Opentelemetry_client.State.Make ()
 open Opentelemetry
 include Common_
 
 let get_headers = Config.Env.get_headers
 
 let set_headers = Config.Env.set_headers
+
+module State = Opentelemetry_client.State.Make (Config.Env)
+module Sender = Signal.Sender (Config.Env) (State)
 
 (** Something sent to the collector *)
 module Event = struct
@@ -325,34 +327,17 @@ end) : Opentelemetry.Collector.BACKEND = struct
   let backend = Backend_impl.create ~stop:Arg.stop ~config:Arg.config ()
 
   let send_trace : Trace.resource_spans list sender =
-    {
-      send =
-        (fun l ~ret ->
-          Backend_impl.send_event backend (Event.E_trace l);
-          ret ());
-    }
+    Sender.send_trace (fun l ->
+        Backend_impl.send_event backend (Event.E_trace l))
 
-  let signal_emit_gc_metrics () =
-    if Arg.config.common.debug then
-      Printf.eprintf "opentelemetry: emit GC metrics requested\n%!";
-    State.set_needs_gc_metrics true
+  let signal_emit_gc_metrics = Sender.signal_emit_gc_metrics
 
   let send_metrics : Metrics.resource_metrics list sender =
-    {
-      send =
-        (fun m ~ret ->
-          let m = List.rev_append (State.additional_metrics ()) m in
-          Backend_impl.send_event backend (Event.E_metric m);
-          ret ());
-    }
+    Sender.send_metrics (fun m ->
+        Backend_impl.send_event backend (Event.E_metric m))
 
   let send_logs : Logs.resource_logs list sender =
-    {
-      send =
-        (fun m ~ret ->
-          Backend_impl.send_event backend (Event.E_logs m);
-          ret ());
-    }
+    Sender.send_logs (fun m -> Backend_impl.send_event backend (Event.E_logs m))
 
   let on_tick_cbs_ = Atomic.make (AList.make ())
 
