@@ -80,15 +80,11 @@ let str_to_hex (s : string) : string =
   done;
   Bytes.unsafe_to_string res
 
-module Backend_impl : sig
-  type t
+module Backend_impl (Arg : sig
+  val stop : bool Atomic.t
 
-  val create : stop:bool Atomic.t -> config:Config.t -> unit -> t
-
-  val send_event : t -> Event.t -> unit
-
-  val shutdown : t -> on_done:(unit -> unit) -> unit
-end = struct
+  val config : Config.t
+end) : Signal.EMITTER = struct
   open Opentelemetry.Proto
 
   type t = {
@@ -154,8 +150,6 @@ end = struct
 
       (* avoid crazy error loop *)
       Thread.delay 3.
-
-  let[@inline] send_event (self : t) ev : unit = B_queue.push self.q ev
 
   (** Thread that, in a loop, reads from [q] to get the next message to send via
       http *)
@@ -276,12 +270,12 @@ end = struct
       done
     with B_queue.Closed -> ()
 
-  let create ~stop ~config () : t =
-    let n_send_threads = max 2 config.Config.bg_threads in
+  let backend : t =
+    let n_send_threads = max 2 Arg.config.bg_threads in
     let self =
       {
-        stop;
-        config;
+        stop = Arg.stop;
+        config = Arg.config;
         q = B_queue.create ();
         send_threads = [||];
         send_q = B_queue.create ();
@@ -299,11 +293,14 @@ end = struct
 
     self
 
-  let shutdown self ~on_done : unit =
+  let[@inline] send_event ev : unit = B_queue.push backend.q ev
+
+  let cleanup ~on_done () : unit =
+    let self = backend in
     Atomic.set self.stop true;
     if not (Atomic.exchange self.cleaned true) then (
       (* empty batches *)
-      send_event self Event.E_flush_all;
+      send_event Event.E_flush_all;
       (* close the incoming queue, wait for the thread to finish
          before we start cutting off the background threads, so that they
          have time to receive the final batches *)
@@ -314,6 +311,14 @@ end = struct
       Array.iter Thread.join self.send_threads
     );
     on_done ()
+
+  let push_trace l = send_event (Event.E_trace l)
+
+  let push_metrics m = send_event (Event.E_metric m)
+
+  let push_logs l = send_event (Event.E_logs l)
+
+  let tick = State.Tick.tick @@ fun () -> send_event Event.E_tick
 end
 
 module Backend (Arg : sig
@@ -323,28 +328,24 @@ module Backend (Arg : sig
 end) : Opentelemetry.Collector.BACKEND = struct
   open Opentelemetry.Proto
   open Opentelemetry.Collector
-
-  let backend = Backend_impl.create ~stop:Arg.stop ~config:Arg.config ()
+  module Emitter = Backend_impl (Arg)
 
   let send_trace : Trace.resource_spans list sender =
-    Sender.send_trace (fun l ->
-        Backend_impl.send_event backend (Event.E_trace l))
+    Sender.send_trace Emitter.push_trace
 
   let signal_emit_gc_metrics = Sender.signal_emit_gc_metrics
 
   let send_metrics : Metrics.resource_metrics list sender =
-    Sender.send_metrics (fun m ->
-        Backend_impl.send_event backend (Event.E_metric m))
+    Sender.send_metrics Emitter.push_metrics
 
   let send_logs : Logs.resource_logs list sender =
-    Sender.send_logs (fun m -> Backend_impl.send_event backend (Event.E_logs m))
+    Sender.send_logs Emitter.push_logs
 
   let set_on_tick_callbacks = State.Tick.set_on_tick_callbacks
 
-  let tick =
-    State.Tick.tick @@ fun () -> Backend_impl.send_event backend Event.E_tick
+  let tick = Emitter.tick
 
-  let cleanup ~on_done () = Backend_impl.shutdown backend ~on_done
+  let cleanup ~on_done = Emitter.cleanup ~on_done
 end
 
 let create_backend ?(stop = Atomic.make false)
