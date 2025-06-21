@@ -98,7 +98,7 @@ end) : Signal.EMITTER = struct
     mutable send_threads: Thread.t array;  (** Threads that send data via http *)
   }
 
-  let send_http_ ~stop ~(config : Config.t) (client : Curl.t) ~url data : unit =
+  let send_http_ (client : Curl.t) ~url data : unit =
     let@ _sc =
       Self_trace.with_ ~kind:Span.Span_kind_producer "otel-ocurl.send-http"
     in
@@ -107,7 +107,7 @@ end) : Signal.EMITTER = struct
       Printf.eprintf "opentelemetry: send http POST to %s (%dB)\n%!" url
         (String.length data);
     let headers =
-      ("Content-Type", "application/x-protobuf") :: config.common.headers
+      ("Content-Type", "application/x-protobuf") :: Arg.config.common.headers
     in
     match
       let@ _sc =
@@ -140,7 +140,7 @@ end) : Signal.EMITTER = struct
       ()
     | exception Sys.Break ->
       Printf.eprintf "ctrl-c captured, stopping\n%!";
-      Atomic.set stop true
+      Atomic.set Arg.stop true
     | Error (code, msg) ->
       (* TODO: log error _via_ otel? *)
       State.incr_errors ();
@@ -157,18 +157,17 @@ end) : Signal.EMITTER = struct
   let bg_thread_loop (self : t) : unit =
     Ezcurl.with_client ?set_opts:None @@ fun client ->
     let config = Arg.config in
-    let stop = Arg.stop in
     let send ~name ~url ~conv signals =
       let l = List.fold_left (fun acc l -> List.rev_append l acc) [] signals in
       let@ _sp =
         Self_trace.with_ ~kind:Span_kind_producer name
           ~attrs:[ "n", `Int (List.length l) ]
       in
-      conv l |> send_http_ ~stop ~config ~url client
+      conv l |> send_http_ ~url client
     in
     let module Conv = Signal.Converter in
     try
-      while not (Atomic.get stop) do
+      while not (Atomic.get Arg.stop) do
         let msg = B_queue.pop self.send_q in
         match msg with
         | To_send.Send_trace tr ->
