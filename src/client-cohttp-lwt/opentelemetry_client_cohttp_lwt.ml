@@ -15,7 +15,6 @@ let set_headers = Config.Env.set_headers
 let get_headers = Config.Env.get_headers
 
 module State = Opentelemetry_client.State.Make (Config.Env)
-module Sender = Signal.Sender (Config.Env) (State)
 
 external reraise : exn -> 'a = "%reraise"
 (** This is equivalent to [Lwt.reraise]. We inline it here so we don't force to
@@ -259,6 +258,7 @@ end) : Signal.EMITTER = struct
     | `Ok -> ()
 
   let push_trace e =
+    (* TODO: move guards into Sender? *)
     let@ () = guard_exn_ "push trace" in
     Batch.push batch_traces e |> report_dropped;
     let now = Mtime_clock.now () in
@@ -268,7 +268,6 @@ end) : Signal.EMITTER = struct
 
   let push_metrics e =
     let@ () = guard_exn_ "push metrics" in
-    State.sample_gc_metrics_if_needed ();
     Batch.push batch_metrics e |> report_dropped;
     let now = Mtime_clock.now () in
     Lwt.async (fun () ->
@@ -310,8 +309,7 @@ end
 
 let create_backend ?(stop = Atomic.make false) ?(config = Config.make ()) () :
     (module Collector.BACKEND) =
-  (module Client.Backend.Make
-            (Sender)
+  (module Client.Backend.Make (Config.Env) (State)
             (Emitter (struct
               let stop = stop
 

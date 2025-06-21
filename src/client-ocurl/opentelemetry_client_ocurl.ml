@@ -16,7 +16,6 @@ let get_headers = Config.Env.get_headers
 let set_headers = Config.Env.set_headers
 
 module State = Opentelemetry_client.State.Make (Config.Env)
-module Sender = Signal.Sender (Config.Env) (State)
 
 (** Something sent to the collector *)
 module Event = struct
@@ -210,7 +209,6 @@ end) : Signal.EMITTER = struct
 
   let main_thread_loop (self : t) : unit =
     let local_q = Queue.create () in
-    let config = Arg.config in
 
     (* keep track of batches *)
     let batches =
@@ -333,8 +331,7 @@ end
 
 let create_backend ?(stop = Atomic.make false)
     ?(config : Config.t = Config.make ()) () : (module Collector.BACKEND) =
-  (module Client.Backend.Make
-            (Sender)
+  (module Client.Backend.Make (Config.Env) (State)
             (Emitter (struct
               let stop = stop
 
