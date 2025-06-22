@@ -144,13 +144,13 @@ end) : Signal.EMITTER = struct
       else
         None
 
-    let batch_traces : Trace.resource_spans list Batch.t =
+    let batch_traces : Trace.resource_spans Batch.t =
       Batch.make ?batch:Arg.config.batch_traces ?timeout ()
 
-    let batch_metrics : Metrics.resource_metrics list Batch.t =
+    let batch_metrics : Metrics.resource_metrics Batch.t =
       Batch.make ?batch:Arg.config.batch_metrics ?timeout ()
 
-    let batch_logs : Logs.resource_logs list Batch.t =
+    let batch_logs : Logs.resource_logs Batch.t =
       Batch.make ?batch:Arg.config.batch_logs ?timeout ()
 
     let send_http_ ~url data : unit Lwt.t =
@@ -177,9 +177,7 @@ end) : Signal.EMITTER = struct
     let send_logs_http (l : Logs.resource_logs list) =
       Conv.logs l |> send_http_ ~url:Arg.config.url_logs
 
-    let maybe_pop ?force ~now batch =
-      Batch.pop_if_ready ?force ~now batch
-      |> Option.map (List.fold_left (fun acc l -> List.rev_append l acc) [])
+    let maybe_pop ?force ~now batch = Batch.pop_if_ready ?force ~now batch
 
     (* emit metrics, if the batch is full or timeout lapsed *)
     let emit_metrics_maybe ?force now : bool Lwt.t =

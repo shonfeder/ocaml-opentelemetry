@@ -2,7 +2,7 @@
 
 type 'a t
 
-val push : 'a t -> 'a -> [ `Dropped | `Ok ]
+val push : 'a t -> 'a list -> [ `Dropped | `Ok ]
 
 val pop_if_ready : ?force:bool -> now:Mtime.t -> 'a t -> 'a list option
 (** Is the batch ready to be emitted? If batching is disabled, this is true as

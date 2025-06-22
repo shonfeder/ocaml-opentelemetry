@@ -1,6 +1,6 @@
 type 'a t = {
   mutable size: int;
-  mutable q: 'a list;
+  mutable q: 'a list list;
   batch: int option;
   high_watermark: int;
   timeout: Mtime.span option;
@@ -40,7 +40,8 @@ let pop_if_ready ?(force = false) ~now (self : _ t) : _ list option =
     self.q <- [];
     self.size <- 0;
     assert (l <> []);
-    Some l
+    let ls = List.fold_left (fun acc l -> List.rev_append l acc) [] l in
+    Some ls
   ) else
     None
 
