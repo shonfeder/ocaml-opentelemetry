@@ -178,11 +178,9 @@ end) : Signal.EMITTER = struct
     let send_logs_http (l : Logs.resource_logs list) =
       Conv.logs l |> send_http_ ~url:Arg.config.url_logs
 
-    let maybe_pop ?force ~now batch = Batch.pop_if_ready ?force ~now batch
-
     (* emit metrics, if the batch is full or timeout lapsed *)
     let emit_metrics_maybe ?force now : bool Lwt.t =
-      match maybe_pop ?force ~now batch_metrics with
+      match Batch.pop_if_ready ?force ~now batch_metrics with
       | None -> Lwt.return false
       | Some l ->
         (* TODO: Move this drain into the batch popping logic! *)
@@ -191,14 +189,14 @@ end) : Signal.EMITTER = struct
         true
 
     let emit_traces_maybe ?force now : bool Lwt.t =
-      match maybe_pop ?force ~now batch_traces with
+      match Batch.pop_if_ready ?force ~now batch_traces with
       | None -> Lwt.return false
       | Some l ->
         let+ () = send_traces_http l in
         true
 
     let emit_logs_maybe ?force now : bool Lwt.t =
-      match maybe_pop ?force ~now batch_logs with
+      match Batch.pop_if_ready ?force ~now batch_logs with
       | None -> Lwt.return false
       | Some l ->
         let+ () = send_logs_http l in
