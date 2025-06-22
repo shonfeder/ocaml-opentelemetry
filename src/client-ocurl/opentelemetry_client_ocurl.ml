@@ -8,6 +8,7 @@ module Config = Config
 module Client = Opentelemetry_client
 module Self_trace = Client.Self_trace
 module Signal = Client.Signal
+module Batch = Client.Batch
 open Opentelemetry
 include Common_
 
@@ -34,9 +35,9 @@ module To_send = struct
   open Opentelemetry.Proto
 
   type t =
-    | Send_metric of Metrics.resource_metrics list list
-    | Send_trace of Trace.resource_spans list list
-    | Send_logs of Logs.resource_logs list list
+    | Send_metric of Metrics.resource_metrics list
+    | Send_trace of Trace.resource_spans list
+    | Send_logs of Logs.resource_logs list
 end
 
 (** start a thread in the background, running [f()] *)
@@ -164,12 +165,11 @@ end) : Signal.EMITTER = struct
     Ezcurl.with_client ?set_opts:None @@ fun client ->
     let config = Arg.config in
     let send ~name ~url ~conv signals =
-      let l = List.fold_left (fun acc l -> List.rev_append l acc) [] signals in
       let@ _sp =
         Self_trace.with_ ~kind:Span_kind_producer name
-          ~attrs:[ "n", `Int (List.length l) ]
+          ~attrs:[ "n", `Int (List.length signals) ]
       in
-      conv l |> send_http_ ~url client
+      conv signals |> send_http_ ~url client
     in
     let module Conv = Signal.Converter in
     try
@@ -194,46 +194,42 @@ end) : Signal.EMITTER = struct
     metrics: Proto.Metrics.resource_metrics Batch.t;
   }
 
-  let batch_max_size_ = 200
-
-  let timeout_expired_ ~now batch : bool =
-    match timeout with
-    | Some t ->
-      let elapsed = Mtime.span now (Batch.time_started batch) in
-      Mtime.Span.compare elapsed t >= 0
-    | None -> false
-
-  let should_send_batch_ ?(side = []) ~now (b : _ Batch.t) : bool =
-    (Batch.len b > 0 || side != [])
-    && (Batch.len b >= batch_max_size_ || timeout_expired_ ~now b)
-
   let main_thread_loop (self : t) : unit =
     let local_q = Queue.create () in
 
     (* keep track of batches *)
     let batches =
       {
-        traces = Batch.create ();
-        logs = Batch.create ();
-        metrics = Batch.create ();
+        traces = Batch.make ?batch:Arg.config.common.batch_traces ?timeout ();
+        metrics = Batch.make ?batch:Arg.config.common.batch_logs ?timeout ();
+        logs = Batch.make ?batch:Arg.config.common.batch_metrics ?timeout ();
       }
     in
 
-    let send_metrics () =
-      let metrics =
-        (* TODO: Move this drain into the batching logic! *)
-        State.drain_gc_metrics () :: Batch.pop_all batches.metrics
-      in
-      B_queue.push self.send_q (To_send.Send_metric metrics)
+    (* emit metrics, if the batch is full or timeout lapsed *)
+    let emit_metrics_maybe ?force now : bool =
+      match Batch.pop_if_ready ?force ~now batches.metrics with
+      | None -> false
+      | Some l ->
+        let metrics = State.drain_gc_metrics () @ l in
+        B_queue.push self.send_q (To_send.Send_metric metrics);
+        true
     in
 
-    let send_logs () =
-      B_queue.push self.send_q (To_send.Send_logs (Batch.pop_all batches.logs))
+    let emit_traces_maybe ?force now : bool =
+      match Batch.pop_if_ready ?force ~now batches.traces with
+      | None -> false
+      | Some l ->
+        B_queue.push self.send_q (To_send.Send_trace l);
+        true
     in
 
-    let send_traces () =
-      B_queue.push self.send_q
-        (To_send.Send_trace (Batch.pop_all batches.traces))
+    let emit_logs_maybe ?force now : bool =
+      match Batch.pop_if_ready ?force ~now batches.logs with
+      | None -> false
+      | Some l ->
+        B_queue.push self.send_q (To_send.Send_logs l);
+        true
     in
 
     try
@@ -247,9 +243,9 @@ end) : Signal.EMITTER = struct
         (* how to process a single event *)
         let process_ev (ev : Event.t) : unit =
           match ev with
-          | Event.E_metric m -> Batch.push batches.metrics m
-          | Event.E_trace tr -> Batch.push batches.traces tr
-          | Event.E_logs logs -> Batch.push batches.logs logs
+          | Event.E_metric m -> ignore (Batch.push batches.metrics m)
+          | Event.E_trace tr -> ignore (Batch.push batches.traces tr)
+          | Event.E_logs logs -> ignore (Batch.push batches.logs logs)
           | Event.E_tick ->
             (* the only impact of "tick" is that it wakes us up regularly *)
             ()
@@ -259,24 +255,11 @@ end) : Signal.EMITTER = struct
         Queue.iter process_ev local_q;
         Queue.clear local_q;
 
-        (* TODO: Move all this into batcher *)
-        if !must_flush_all then (
-          if Batch.len batches.metrics > 0 || not (State.gc_metrics_empty ())
-          then
-            send_metrics ();
-          if Batch.len batches.logs > 0 then send_logs ();
-          if Batch.len batches.traces > 0 then send_traces ()
-        ) else (
-          let now = Mtime_clock.now () in
-          if
-            should_send_batch_ ~now batches.metrics
-              ~side:(State.get_gc_metrics ())
-          then
-            send_metrics ();
-
-          if should_send_batch_ ~now batches.traces then send_traces ();
-          if should_send_batch_ ~now batches.logs then send_logs ()
-        )
+        let now = Mtime_clock.now () in
+        let force = !must_flush_all in
+        ignore (emit_metrics_maybe ~force now);
+        ignore (emit_traces_maybe ~force now);
+        ignore (emit_logs_maybe ~force now)
       done
     with B_queue.Closed -> ()
 
