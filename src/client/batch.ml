@@ -1,15 +1,21 @@
+(* TODO: Add mutex *)
 type 'a t = {
   mutable size: int;
   mutable q: 'a list list;
-  batch: int option;
+  batch: int; (* Minimum size to batch before popping *)
   high_watermark: int;
   timeout: Mtime.span option;
   mutable start: Mtime.t;
 }
 
-let make ?batch ?timeout () : _ t =
-  Option.iter (fun b -> assert (b > 0)) batch;
-  let high_watermark = Option.fold ~none:100 ~some:(fun x -> x * 10) batch in
+let make ?(batch = 1) ?timeout () : _ t =
+  assert (batch > 0);
+  let high_watermark =
+    if batch = 1 then
+      100
+    else
+      batch * 10
+  in
   {
     size = 0;
     start = Mtime_clock.now ();
@@ -26,10 +32,8 @@ let timeout_expired_ ~now self : bool =
     Mtime.Span.compare elapsed t >= 0
   | None -> false
 
-let is_full_ self : bool =
-  match self.batch with
-  | None -> self.size > 0
-  | Some b -> self.size >= b
+(* Big enough to send a batch *)
+let is_full_ self : bool = self.size >= self.batch
 
 let ready_to_pop ~force ~now self =
   self.size > 0 && (force || is_full_ self || timeout_expired_ ~now self)

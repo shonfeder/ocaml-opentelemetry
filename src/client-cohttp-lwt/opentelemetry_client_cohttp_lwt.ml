@@ -7,6 +7,7 @@ module OT = Opentelemetry
 module Config = Config
 module Client = Opentelemetry_client
 module Signal = Client.Signal
+module Batch = Client.Batch
 open Opentelemetry
 open Common_
 
