@@ -1,6 +1,13 @@
 (** Constructing and managing OTel
     {{:https://opentelemetry.io/docs/concepts/signals/} signals} *)
 
+open Opentelemetry.Proto
+
+type t =
+  | Traces of Trace.resource_spans list
+  | Metrics of Metrics.resource_metrics list
+  | Logs of Logs.resource_logs list
+
 (** Convert signals to protobuf encoded strings, ready to be sent over the wire
 
     NOTE: The converters share an underlying stateful encoder, so each domain or

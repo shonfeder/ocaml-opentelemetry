@@ -6,6 +6,13 @@ module Span = OT.Span
 
 let ( let@ ) = ( @@ )
 
+open Opentelemetry.Proto
+
+type t =
+  | Traces of Trace.resource_spans list
+  | Metrics of Metrics.resource_metrics list
+  | Logs of Logs.resource_logs list
+
 module Converter = struct
   let resource_to_string ~encoder ~ctor ~enc resource =
     let encoder =

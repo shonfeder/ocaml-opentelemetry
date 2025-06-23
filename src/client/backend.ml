@@ -11,26 +11,26 @@ module Make
 
   let lock = Emitter.lock |> Option.value ~default:(fun f -> f ())
 
-  let dbg_send signals =
+  let dbg_send (signals : Signal.t) =
     if Env.get_debug () then
       let@ () = lock in
       match signals with
-      | `Traces s ->
+      | Traces s ->
         Format.eprintf "span %a"
           (Format.pp_print_list Trace.pp_resource_spans)
           s
-      | `Metrics m ->
+      | Metrics m ->
         Format.eprintf "metrics %a"
           (Format.pp_print_list Metrics.pp_resource_metrics)
           m
-      | `Logs l ->
+      | Logs l ->
         Format.eprintf "logs %a" (Format.pp_print_list Logs.pp_resource_logs) l
 
   let send_trace : Trace.resource_spans list sender =
     {
       send =
         (fun l ~ret ->
-          dbg_send (`Traces l);
+          dbg_send (Traces l);
           Emitter.push_trace l;
           ret ());
     }
@@ -44,7 +44,7 @@ module Make
     {
       send =
         (fun m ~ret ->
-          dbg_send (`Metrics m);
+          dbg_send (Metrics m);
           State.sample_gc_metrics_if_needed ();
           let m = List.rev_append (State.additional_metrics ()) m in
           Emitter.push_metrics m;
@@ -55,7 +55,7 @@ module Make
     {
       send =
         (fun l ~ret ->
-          dbg_send (`Logs l);
+          dbg_send (Logs l);
           Emitter.push_logs l;
           ret ());
     }
