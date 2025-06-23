@@ -158,8 +158,7 @@ end) : Signal.EMITTER = struct
       (* avoid crazy error loop *)
       Thread.delay 3.
 
-  (*
-* Thread that, in a loop, reads from [q] to get the next message to send via
+  (* Thread that, in a loop, reads from [q] to get the next message to send via
       http *)
   let bg_thread_loop (self : t) : unit =
     Ezcurl.with_client ?set_opts:None @@ fun client ->
