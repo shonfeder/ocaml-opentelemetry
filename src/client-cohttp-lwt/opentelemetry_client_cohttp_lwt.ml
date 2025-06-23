@@ -154,20 +154,21 @@ end) : Signal.EMITTER = struct
     let batch_logs : Logs.resource_logs Batch.t =
       Batch.make ?batch:Arg.config.batch_logs ?timeout ()
 
-    let send_http_ ~url data : unit Lwt.t =
+    let send_http_ ~url data : _ Lwt.t =
       let* r = Httpc.send ~url ~decode:(`Ret ()) data in
       match r with
-      | Ok () -> Lwt.return ()
+      | Ok () -> Lwt.return (Ok ())
       | Error `Sysbreak ->
         Printf.eprintf "ctrl-c captured, stopping\n%!";
         Atomic.set Arg.stop true;
-        Lwt.return ()
+        Lwt.return (Ok ())
       | Error err ->
         (* TODO: log error _via_ otel? *)
         State.incr_errors ();
         report_err_ err;
         (* avoid crazy error loop *)
-        Lwt_unix.sleep 3.
+        let* () = Lwt_unix.sleep 3. in
+        Lwt.return (Error ())
 
     let send_metrics_http (l : Metrics.resource_metrics list) =
       Conv.metrics l |> send_http_ ~url:Arg.config.url_metrics
@@ -185,21 +186,21 @@ end) : Signal.EMITTER = struct
       | Some l ->
         (* TODO: Move this drain into the batch popping logic! *)
         let batch = State.drain_gc_metrics () @ l in
-        let+ () = send_metrics_http batch in
+        let+ _ = send_metrics_http batch in
         true
 
     let emit_traces_maybe ?force now : bool Lwt.t =
       match Batch.pop_if_ready ?force ~now batch_traces with
       | None -> Lwt.return false
       | Some l ->
-        let+ () = send_traces_http l in
+        let+ _ = send_traces_http l in
         true
 
     let emit_logs_maybe ?force now : bool Lwt.t =
       match Batch.pop_if_ready ?force ~now batch_logs with
       | None -> Lwt.return false
       | Some l ->
-        let+ () = send_logs_http l in
+        let+ _ = send_logs_http l in
         true
 
     let[@inline] guard_exn_ where f =
@@ -239,6 +240,40 @@ end) : Signal.EMITTER = struct
   let report_dropped = function
     | `Dropped -> State.incr_dropped ()
     | `Ok -> ()
+
+  let step : State.Action.t -> State.Event.t option Lwt.t = function
+    | State.Action.End -> Lwt.return None (* "TODO WTF?" *)
+    | State.Action.Start -> raise (Failure "TODO")
+    | State.Action.Wait -> Lwt.return (Some State.Event.ready)
+    | State.Action.Send { url; data } ->
+      let+ res = send_http_ ~url data in
+      Option.some
+        (match res with
+        | Ok () -> State.Event.ready
+        | Error () -> State.Event.error)
+
+  let update s e = State.update s e |> Lwt_seq.of_seq
+
+  (* let rec act (s : State.State.t) = *)
+  (*   let rec loop : State.Action.t Lwt_seq.t -> _ = *)
+  (*    fun actions -> *)
+  (*     (\* TODO: Confirm that this will actually terminate (just based on reducing to an empty sequence) *\) *)
+  (*     actions |> Lwt_seq.filter_map_s step *)
+  (*     |> Lwt_seq.flat_map (update s) *)
+  (*     |> loop *)
+  (*   in *)
+  (*   loop (update s State.Event.ready) *)
+  let push_trace' (s : State.State.t) e =
+    State.update s (State.Event.batch (Signal.Traces e))
+
+  let push_metrics' (s : State.State.t) e =
+    State.update s (State.Event.batch (Signal.Metrics e))
+
+  let push_logs' (s : State.State.t) e =
+    State.update s (State.Event.batch (Signal.Logs e))
+
+  (* TODO: WTF should be going on here? *)
+  let tick s () = update s State.Event.ready |> Lwt_seq.filter_map_s step
 
   let push_trace e =
     (* TODO: move guards into Sender? *)

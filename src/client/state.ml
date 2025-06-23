@@ -25,6 +25,35 @@ module type STATE = sig
 
     val tick : (unit -> 'a) -> unit -> 'a
   end
+
+  module State : sig
+    type t
+  end
+
+  module Action : sig
+    type t = private
+      | Start
+      | Wait
+      | Send of {
+          url: string;
+          data: string;
+        }
+      | End
+  end
+
+  module Event : sig
+    type t
+
+    val stop : t
+
+    val ready : t
+
+    val error : t
+
+    val batch : Signal.t -> t
+  end
+
+  val update : State.t -> Event.t -> Action.t Seq.t
 end
 
 module Make (Env : Config.ENV) : STATE = struct
@@ -137,4 +166,132 @@ module Make (Env : Config.ENV) : STATE = struct
         (AList.get @@ Atomic.get on_tick_cbs_);
       f ()
   end
+
+  module State = struct
+    type batches = {
+      traces: OT.Proto.Trace.resource_spans Batch.t;
+      logs: OT.Proto.Logs.resource_logs Batch.t;
+      metrics: OT.Proto.Metrics.resource_metrics Batch.t;
+    }
+
+    type t = {
+      batch: batches;
+      config: Config.t;
+    }
+
+    let make (config : Config.t) () =
+      let timeout =
+        if config.batch_timeout_ms > 0 then
+          Some Mtime.Span.(config.batch_timeout_ms * ms)
+        else
+          None
+      in
+      {
+        config;
+        batch =
+          {
+            traces = Batch.make ?batch:config.batch_traces ?timeout ();
+            metrics = Batch.make ?batch:config.batch_logs ?timeout ();
+            logs = Batch.make ?batch:config.batch_metrics ?timeout ();
+          };
+      }
+  end
+
+  module Action = struct
+    type t =
+      | Start
+      | Wait
+      | Send of {
+          url: string;
+          data: string;
+        }
+      | End
+
+    let send ~url data = Send { url; data }
+  end
+
+  module Event = struct
+    type t =
+      | Stop
+      | Ready
+      | Send_error
+      | Batch of Signal.t
+
+    let stop = Stop
+
+    let ready = Ready
+
+    let error = Send_error
+
+    let batch s = Batch s
+  end
+
+  module Conv = Signal.Converter
+
+  let send_metrics ?force now (s : State.t) =
+    match Batch.pop_if_ready ?force ~now s.batch.metrics with
+    | None -> Seq.empty
+    | Some ms ->
+      drain_gc_metrics () @ ms
+      |> Conv.metrics
+      |> Action.send ~url:s.config.url_metrics
+      |> Seq.return
+
+  let send_traces ?force now (s : State.t) =
+    match Batch.pop_if_ready ?force ~now s.batch.traces with
+    | None -> Seq.empty
+    | Some ts ->
+      Conv.traces ts |> Action.send ~url:s.config.url_traces |> Seq.return
+
+  let send_logs ?force now (s : State.t) =
+    match Batch.pop_if_ready ?force ~now s.batch.logs with
+    | None -> Seq.empty
+    | Some ls ->
+      Conv.logs ls |> Action.send ~url:s.config.url_logs |> Seq.return
+
+  let send ?force (s : State.t) =
+    let now = Mtime_clock.now () in
+    send_logs ?force now s
+    |> Seq.append (send_traces ?force now s)
+    |> Seq.append (send_metrics ?force now s)
+
+  let batch (s : State.t) : Signal.t -> Action.t Seq.t =
+   fun signal ->
+    let now = Mtime_clock.now () in
+    let dropped, action =
+      match signal with
+      | Metrics ms -> Batch.push s.batch.metrics ms, send_metrics now s
+      | Traces ts -> Batch.push s.batch.traces ts, send_traces now s
+      | Logs ls -> Batch.push s.batch.logs ls, send_logs now s
+    in
+    let () =
+      match dropped with
+      | `Dropped -> incr_dropped ()
+      | `Ok -> ()
+    in
+    action
+
+  let send_error (_ : State.t) =
+    incr_errors ();
+    Seq.return Action.Wait
+
+  let stop (t : State.t) =
+    Seq.append (send ~force:true t) (Seq.return Action.End)
+
+  let update (t : State.t) : Event.t -> Action.t Seq.t = function
+    | Ready -> send t
+    | Batch signal -> batch t signal
+    | Send_error -> send_error t
+    | Stop -> stop t
+
+  (* let run config : (Action.t -> Event.t) -> (Action.t * Event.t) Seq.t = *)
+  (*  fun delta -> *)
+  (*   let t = State.make config () in *)
+  (*   let rec loop action = *)
+  (*     let event = delta action in *)
+  (*     match update t event with *)
+  (*     | None -> Seq.empty *)
+  (*     | Some actions -> Seq.cons (action, event) (Seq.flat_map loop actions) *)
+  (*   in *)
+  (*   loop Start *)
 end
